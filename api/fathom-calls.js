@@ -1,9 +1,19 @@
 // api/fathom-calls.js
 // GET /api/fathom-calls — returns last 4 weeks of calls filtered to onboarding POCs
-import { POC_FATHOM_NAMES } from '../lib/specialistMap.js';
+
+const POC_FATHOM_NAMES = new Set([
+  "aakash revankar",
+  "aditi goel",
+  "aditya gupta",
+  "devak grover",
+  "jagrit popli",
+  "ritima singh",
+  "shivam kumar",
+  "tarun rana",
+]);
 
 const CACHE_KEY = 'fathom_calls_4weeks';
-const CACHE_TTL = 1800; // 30 min in seconds
+const CACHE_TTL = 1800;
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
@@ -31,9 +41,10 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2. Fetch fresh from Fathom
+    // 2. Check Fathom API key
     const fathomKey = process.env.FATHOM_API_KEY;
     if (!fathomKey) {
+      console.log('Missing FATHOM_API_KEY');
       return res.status(200).json({
         calls: [],
         fetchedAt: null,
@@ -41,11 +52,12 @@ export default async function handler(req, res) {
       });
     }
 
+    // 3. Fetch last 4 weeks from Fathom
     const fourWeeksAgo = new Date();
     fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
     const calls = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
 
-    // 3. Filter to onboarding POCs only
+    // 4. Filter to onboarding POCs only
     const filtered = calls.filter(call => {
       const recorder = (call.recorded_by || '').trim().toLowerCase();
       return POC_FATHOM_NAMES.has(recorder);
@@ -57,7 +69,7 @@ export default async function handler(req, res) {
       fetchedAt: new Date().toISOString()
     };
 
-    // 4. Cache in Upstash
+    // 5. Cache in Upstash
     if (apiUrl && apiToken) {
       await fetch(`${apiUrl}/set/${CACHE_KEY}/ex/${CACHE_TTL}`, {
         method: 'POST',
