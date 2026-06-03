@@ -1,6 +1,10 @@
 // api/enrich-call.js
 // GET /api/enrich-call?recording_id=xxx
-// Fetches Fathom summary → sends to Claude → returns enriched sentiment + actions
+// Fetches Fathom summary + transcript → parses actions + scores sentiment locally
+
+import Sentiment from 'sentiment';
+
+const analyzer = new Sentiment();
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -27,84 +31,141 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2. Fetch summary from Fathom
     const fathomKey = process.env.FATHOM_API_KEY;
-    if (!fathomKey) return res.status(200).json({ error: 'No Fathom API key configured' });
+    if (!fathomKey) return res.status(200).json({ enriched: false, reason: 'No Fathom API key' });
 
-    const summaryRes = await fetch(
-      `https://api.fathom.ai/external/v1/recordings/${recording_id}/summary`,
-      { headers: { 'X-Api-Key': fathomKey } }
-    );
-
-    if (!summaryRes.ok) {
-      const errText = await summaryRes.text();
-      console.error('Fathom summary error:', summaryRes.status, errText);
-      return res.status(200).json({ error: `Fathom ${summaryRes.status}`, enriched: false });
-    }
-
-    const summaryData = await summaryRes.json();
-    const summaryText = summaryData?.summary?.markdown_formatted || null;
-
-    if (!summaryText) {
-      return res.status(200).json({ enriched: false, reason: 'No summary available yet' });
-    }
-
-    // 3. Send to Claude for analysis
-    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system: `You are analysing a call summary from a SaaS onboarding team (Loop Subscriptions). 
-Extract structured data and return ONLY a valid JSON object — no markdown, no backticks, no explanation.`,
-        messages: [{
-          role: 'user',
-          content: `Analyse this call summary and return a JSON object with exactly these fields:
-
-{
-  "sentiment": <integer 0-100, where 0=very negative, 50=neutral, 100=very positive>,
-  "sentimentLabel": <"positive" if sentiment>=70, "neutral" if 45-69, "negative" if <45>,
-  "loopActions": <array of up to 4 action items that the Loop/onboarding team needs to do>,
-  "merchantActions": <array of up to 3 action items that the merchant/customer needs to do>,
-  "summary": <one sentence (max 20 words) capturing the key outcome of this call>
-}
-
-Call summary:
-${summaryText}`
-        }]
+    // 2. Fetch summary + transcript in parallel
+    const [summaryRes, transcriptRes] = await Promise.all([
+      fetch(`https://api.fathom.ai/external/v1/recordings/${recording_id}/summary`, {
+        headers: { 'X-Api-Key': fathomKey }
+      }),
+      fetch(`https://api.fathom.ai/external/v1/recordings/${recording_id}/transcript`, {
+        headers: { 'X-Api-Key': fathomKey }
       })
-    });
+    ]);
 
-    if (!claudeRes.ok) {
-      const errText = await claudeRes.text();
-      console.error('Claude error:', claudeRes.status, errText);
-      return res.status(200).json({ enriched: false, reason: 'Claude analysis failed' });
+    if (!summaryRes.ok && !transcriptRes.ok) {
+      return res.status(200).json({ enriched: false, reason: 'Fathom fetch failed' });
     }
 
-    const claudeData = await claudeRes.json();
-    const rawText = claudeData.content?.[0]?.text || '';
+    // 3. Parse summary markdown → extract purpose, next steps, key takeaways
+    let purpose = '';
+    let loopActions = [];
+    let merchantActions = [];
+    let callHealth = 'on-track';
+    let summaryMarkdown = '';
 
-    let enriched;
-    try {
-      enriched = JSON.parse(rawText.replace(/```json|```/g, '').trim());
-    } catch (e) {
-      console.error('Claude JSON parse error:', e.message, rawText);
-      return res.status(200).json({ enriched: false, reason: 'Could not parse Claude response' });
+    if (summaryRes.ok) {
+      const summaryData = await summaryRes.json();
+      summaryMarkdown = summaryData?.summary?.markdown_formatted || '';
+      
+      if (summaryMarkdown) {
+        // Extract meeting purpose (first heading content)
+        const purposeMatch = summaryMarkdown.match(/##\s*Meeting Purpose[\s\S]*?\n+([^\n#]+)/i);
+        if (purposeMatch) {
+          // Strip markdown links [text](url) → text
+          purpose = purposeMatch[1].replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').trim();
+        }
+
+        // Detect call health from key takeaways
+        const lowerMd = summaryMarkdown.toLowerCase();
+        if (lowerMd.includes('blocked') || lowerMd.includes('blocker')) {
+          callHealth = 'blocked';
+        } else if (lowerMd.includes('at risk') || lowerMd.includes('concern') || lowerMd.includes('delay')) {
+          callHealth = 'at-risk';
+        }
+
+        // Extract Next Steps section
+        const nextStepsMatch = summaryMarkdown.match(/##\s*Next Steps([\s\S]*?)(?=##|$)/i);
+        if (nextStepsMatch) {
+          const nextStepsText = nextStepsMatch[1];
+          const lines = nextStepsText.split('\n').filter(l => l.trim());
+
+          let currentOwner = null;
+          const LOOP_NAMES = ['tarun', 'aditi', 'aditya', 'jagrit', 'ritima', 'shivam', 'aakash', 'devak', 'loop'];
+
+          lines.forEach(line => {
+            // Detect owner heading e.g. "**Tarun:**" or "- **Sam:**"
+            const ownerMatch = line.match(/\*\*([^*:]+)[:*]/);
+            if (ownerMatch) {
+              currentOwner = ownerMatch[1].trim().toLowerCase();
+              return;
+            }
+
+            // Extract action item — strip markdown links and bullets
+            const cleaned = line
+              .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // [text](url) → text
+              .replace(/^[\s\-*]+/, '')                   // leading bullets
+              .trim();
+
+            if (!cleaned || cleaned.length < 5) return;
+
+            const isLoopOwner = currentOwner && LOOP_NAMES.some(n => currentOwner.includes(n));
+
+            if (isLoopOwner) {
+              if (loopActions.length < 4) loopActions.push(cleaned);
+            } else {
+              if (merchantActions.length < 3) merchantActions.push(cleaned);
+            }
+          });
+        }
+      }
+    }
+
+    // 4. Score sentiment from transcript — merchant lines only
+    let sentiment = 55;
+    let sentimentLabel = 'neutral';
+
+    if (transcriptRes.ok) {
+      const transcriptData = await transcriptRes.json();
+      const lines = transcriptData?.transcript || [];
+
+      // Identify the merchant speaker — the non-Loop participant
+      // Loop team emails end in @loopwork.co, so merchant is anyone else
+      const speakerMap = {};
+      lines.forEach(l => {
+        const name = l.speaker?.display_name || '';
+        const email = l.speaker?.matched_calendar_invitee_email || '';
+        if (name && !speakerMap[name]) {
+          speakerMap[name] = email;
+        }
+      });
+
+      const loopEmails = ['loopwork.co'];
+      const merchantSpeakers = Object.entries(speakerMap)
+        .filter(([, email]) => !loopEmails.some(d => email.includes(d)))
+        .map(([name]) => name.toLowerCase());
+
+      // Get all merchant text
+      const merchantText = lines
+        .filter(l => merchantSpeakers.includes((l.speaker?.display_name || '').toLowerCase()))
+        .map(l => l.text)
+        .join(' ');
+
+      if (merchantText.trim()) {
+        const result = analyzer.analyze(merchantText);
+        // comparative score typically ranges -1 to +1
+        // map to 0-100 scale: 0→10, -0.5→~0, +0.5→~100
+        const raw = result.comparative;
+        const mapped = Math.round(Math.min(100, Math.max(0, (raw + 0.5) * 100)));
+        sentiment = mapped;
+        sentimentLabel = sentiment >= 70 ? 'positive' : sentiment >= 45 ? 'neutral' : 'negative';
+      }
     }
 
     const payload = {
       enriched: true,
       recording_id,
-      sentiment: enriched.sentiment ?? 55,
-      sentimentLabel: enriched.sentimentLabel ?? 'neutral',
-      loopActions: enriched.loopActions ?? [],
-      merchantActions: enriched.merchantActions ?? [],
-      summary: enriched.summary ?? '',
+      purpose,
+      sentiment,
+      sentimentLabel,
+      loopActions,
+      merchantActions,
+      callHealth,
       analysedAt: new Date().toISOString()
     };
 
-    // 4. Cache for 6 hours — enrichment doesn't change
+    // 5. Cache for 6 hours
     if (apiUrl && apiToken) {
       await fetch(`${apiUrl}/set/${CACHE_KEY}/ex/21600`, {
         method: 'POST',
