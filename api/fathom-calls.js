@@ -1,15 +1,15 @@
 // api/fathom-calls.js
 // GET /api/fathom-calls — returns last 4 weeks of calls filtered to onboarding POCs
 
-const POC_FATHOM_NAMES = new Set([
-  "aakash revankar",
-  "aditi goel",
-  "aditya gupta",
-  "devak grover",
-  "jagrit popli",
-  "ritima singh",
-  "shivam kumar",
-  "tarun rana",
+const POC_EMAILS = new Set([
+  "aakash.revankar@loopwork.co",
+  "aditi.goel@loopwork.co",
+  "aditya.gupta@loopwork.co",
+  "devak.grover@loopwork.co",
+  "jagrit.popli@loopwork.co",
+  "ritima.singh@loopwork.co",
+  "shivam.kumar@loopwork.co",
+  "tarun.rana@loopwork.co",
 ]);
 
 const CACHE_KEY = 'fathom_calls_4weeks';
@@ -46,7 +46,6 @@ export default async function handler(req, res) {
     console.log('FATHOM_API_KEY present:', !!fathomKey);
 
     if (!fathomKey) {
-      console.log('Missing FATHOM_API_KEY');
       return res.status(200).json({
         calls: [],
         fetchedAt: null,
@@ -62,10 +61,10 @@ export default async function handler(req, res) {
     const calls = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
     console.log('Total calls fetched:', calls.length);
 
-    // 4. Filter to onboarding POCs only
+    // 4. Filter to onboarding POCs by email
     const filtered = calls.filter(call => {
-      const recorder = (call.recorded_by || '').trim().toLowerCase();
-      return POC_FATHOM_NAMES.has(recorder);
+      const email = (call.recorded_by?.email || '').trim().toLowerCase();
+      return POC_EMAILS.has(email);
     });
     console.log('Filtered POC calls:', filtered.length);
 
@@ -91,7 +90,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error('GET /api/fathom-calls error:', err.message);
-    console.error('Full error:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
     return res.status(200).json({
       calls: [],
       fetchedAt: null,
@@ -103,20 +101,22 @@ export default async function handler(req, res) {
 
 async function fetchAllFathomCalls(apiKey, createdAfter) {
   const allCalls = [];
-  let cursor = null;
-  let page = 0;
+  let page = 1;
   const MAX_PAGES = 10;
 
-  while (page < MAX_PAGES) {
-    const params = new URLSearchParams({ created_after: createdAfter, per_page: '50' });
-    if (cursor) params.set('cursor', cursor);
+  while (page <= MAX_PAGES) {
+    const params = new URLSearchParams({
+      created_after: createdAfter,
+      per_page: '50',
+      page: String(page)
+    });
 
-    const url = `https://api.fathom.video/v1/calls?${params}`;
-    console.log('Fetching URL:', url);
+    const url = `https://api.fathom.ai/external/v1/meetings?${params}`;
+    console.log('Fetching:', url);
 
     const response = await fetch(url, {
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'X-Api-Key': apiKey,
         'Content-Type': 'application/json'
       }
     });
@@ -129,11 +129,10 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
     }
 
     const data = await response.json();
-    const calls = data.calls || data.data || [];
-    allCalls.push(...calls);
+    const items = data.items || data.data || data.calls || [];
+    allCalls.push(...items);
 
-    cursor = data.next_cursor || null;
-    if (!cursor || calls.length === 0) break;
+    if (items.length < 50) break;
     page++;
   }
 
