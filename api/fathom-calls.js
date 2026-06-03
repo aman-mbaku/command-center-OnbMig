@@ -101,15 +101,17 @@ export default async function handler(req, res) {
 
 async function fetchAllFathomCalls(apiKey, createdAfter) {
   const allCalls = [];
-  let page = 1;
-  const MAX_PAGES = 10;
+  let cursor = null;
+  let page = 0;
+  const MAX_PAGES = 20;
 
-  while (page <= MAX_PAGES) {
+  while (page < MAX_PAGES) {
     const params = new URLSearchParams({
       created_after: createdAfter,
       per_page: '50',
-      page: String(page)
+      'teams[]': 'On-Boarding'
     });
+    if (cursor) params.set('cursor', cursor);
 
     const url = `https://api.fathom.ai/external/v1/meetings?${params}`;
     console.log('Fetching:', url);
@@ -129,10 +131,11 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
     }
 
     const data = await response.json();
-    const items = data.items || data.data || data.calls || [];
+    const items = data.items || [];
     allCalls.push(...items);
 
-    if (items.length < 50) break;
+    cursor = data.next_cursor || null;
+    if (!cursor || items.length === 0) break;
     page++;
   }
 
