@@ -45,7 +45,7 @@ export default async function handler(req, res) {
         'Authorization': `Bearer ${apiToken}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(JSON.stringify(payload))
+      body: JSON.stringify(payload)
     });
 
     if (!upstashResponse.ok) {
