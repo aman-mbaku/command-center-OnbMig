@@ -43,6 +43,8 @@ export default async function handler(req, res) {
 
     // 2. Check Fathom API key
     const fathomKey = process.env.FATHOM_API_KEY;
+    console.log('FATHOM_API_KEY present:', !!fathomKey);
+
     if (!fathomKey) {
       console.log('Missing FATHOM_API_KEY');
       return res.status(200).json({
@@ -55,13 +57,17 @@ export default async function handler(req, res) {
     // 3. Fetch last 4 weeks from Fathom
     const fourWeeksAgo = new Date();
     fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
+    console.log('Fetching from:', fourWeeksAgo.toISOString());
+
     const calls = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
+    console.log('Total calls fetched:', calls.length);
 
     // 4. Filter to onboarding POCs only
     const filtered = calls.filter(call => {
       const recorder = (call.recorded_by || '').trim().toLowerCase();
       return POC_FATHOM_NAMES.has(recorder);
     });
+    console.log('Filtered POC calls:', filtered.length);
 
     const payload = {
       calls: filtered,
@@ -85,6 +91,7 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error('GET /api/fathom-calls error:', err.message);
+    console.error('Full error:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
     return res.status(200).json({
       calls: [],
       fetchedAt: null,
@@ -104,12 +111,17 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
     const params = new URLSearchParams({ created_after: createdAfter, per_page: '50' });
     if (cursor) params.set('cursor', cursor);
 
-    const response = await fetch(`https://api.fathom.video/v1/calls?${params}`, {
+    const url = `https://api.fathom.video/v1/calls?${params}`;
+    console.log('Fetching URL:', url);
+
+    const response = await fetch(url, {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       }
     });
+
+    console.log('Fathom response status:', response.status);
 
     if (!response.ok) {
       const errText = await response.text();
