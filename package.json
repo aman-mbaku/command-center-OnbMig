@@ -1,0 +1,8 @@
+{
+  "name": "command-center-onb-mig",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "sentiment": "^5.0.2"
+  }
+}
