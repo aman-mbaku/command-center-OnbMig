@@ -1,11 +1,9 @@
 // api/upload.js
-// POST /api/upload — saves parsed pipeline rows to Vercel KV
-// Body: { password: string, rows: array, filename: string }
+// POST /api/upload — saves parsed pipeline rows to Upstash
 
 const UPLOAD_PASSWORD = process.env.UPLOAD_PASSWORD || 'Loop2026';
 
 export default async function handler(req, res) {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -26,7 +24,12 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'No rows provided' });
     }
 
-    const { kv } = await import('@vercel/kv');
+    const apiUrl = process.env.KV_REST_API_URL;
+    const apiToken = process.env.KV_REST_API_TOKEN;
+
+    if (!apiUrl || !apiToken) {
+      return res.status(500).json({ error: 'Upstash credentials not configured' });
+    }
 
     const payload = {
       rows,
@@ -35,8 +38,21 @@ export default async function handler(req, res) {
       rowCount: rows.length
     };
 
-    // Store in KV — persists until next upload
-    await kv.set('pipeline_data', payload);
+    // SET the data in Upstash — store as JSON string
+    const upstashResponse = await fetch(`${apiUrl}/set/pipeline_data`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(JSON.stringify(payload))
+    });
+
+    if (!upstashResponse.ok) {
+      const err = await upstashResponse.text();
+      console.error('Upstash SET failed:', upstashResponse.status, err);
+      return res.status(500).json({ error: 'Failed to save to Upstash', detail: err });
+    }
 
     return res.status(200).json({
       success: true,
@@ -45,7 +61,7 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    console.error('POST /api/upload error:', err);
+    console.error('POST /api/upload error:', err.message);
     return res.status(500).json({ error: 'Failed to save data', detail: err.message });
   }
 }
