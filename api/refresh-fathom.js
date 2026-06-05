@@ -3,13 +3,12 @@
 // No auth needed since it only writes to your own KV, reads no user data
 
 export default async function handler(req, res) {
-  // Only allow GET (cron) or POST (manual trigger)
   if (req.method !== 'GET' && req.method !== 'POST') {
     return res.status(405).end();
   }
 
-  const apiUrl   = process.env.KV_REST_API_URL;
-  const apiToken = process.env.KV_REST_API_TOKEN;
+  const apiUrl    = process.env.KV_REST_API_URL;
+  const apiToken  = process.env.KV_REST_API_TOKEN;
   const fathomKey = process.env.FATHOM_API_KEY;
 
   if (!fathomKey || !apiUrl || !apiToken) {
@@ -36,24 +35,34 @@ export default async function handler(req, res) {
   // ── KV helpers ──
   async function kvGet(key) {
     try {
-      const r = await fetch(`${apiUrl}/get/${key}`, { headers: { 'Authorization': `Bearer ${apiToken}` } });
+      const r = await fetch(`${apiUrl}/get/${key}`, {
+        headers: { 'Authorization': `Bearer ${apiToken}` }
+      });
       if (!r.ok) return null;
       const d = await r.json();
       return d.result ? JSON.parse(d.result) : null;
     } catch { return null; }
   }
+
   async function kvSet(key, value, ttl) {
     try {
       await fetch(`${apiUrl}/set/${key}/ex/${ttl}`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify(JSON.stringify(value))
       });
     } catch { }
   }
+
   async function kvDel(key) {
     try {
-      await fetch(`${apiUrl}/del/${key}`, { method: 'POST', headers: { 'Authorization': `Bearer ${apiToken}` } });
+      await fetch(`${apiUrl}/del/${key}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiToken}` }
+      });
     } catch { }
   }
 
@@ -64,7 +73,12 @@ export default async function handler(req, res) {
       const ageMs = Date.now() - new Date(cached.fetchedAt).getTime();
       if (ageMs < FRESH_TTL * 1000) {
         console.log('Cron: cache still fresh, skipping');
-        return res.status(200).json({ ok: true, skipped: true, reason: 'Cache fresh', ageMin: Math.round(ageMs / 60000) });
+        return res.status(200).json({
+          ok: true,
+          skipped: true,
+          reason: 'Cache fresh',
+          ageMin: Math.round(ageMs / 60000)
+        });
       }
     }
 
@@ -82,8 +96,10 @@ export default async function handler(req, res) {
     const fourWeeksAgo = new Date();
     fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
 
-    const calls = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
-    const filtered = calls.filter(c => POC_EMAILS.has((c.recorded_by?.email || '').trim().toLowerCase()));
+    const calls    = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
+    const filtered = calls.filter(c =>
+      POC_EMAILS.has((c.recorded_by?.email || '').trim().toLowerCase())
+    );
 
     const payload = {
       calls:     filtered,
@@ -95,7 +111,11 @@ export default async function handler(req, res) {
     await kvDel(LOCK_KEY);
 
     console.log('Cron: refreshed', filtered.length, 'calls');
-    return res.status(200).json({ ok: true, total: filtered.length, fetchedAt: payload.fetchedAt });
+    return res.status(200).json({
+      ok:        true,
+      total:     filtered.length,
+      fetchedAt: payload.fetchedAt
+    });
 
   } catch (err) {
     await kvDel(LOCK_KEY);
@@ -104,22 +124,29 @@ export default async function handler(req, res) {
   }
 }
 
-// ── Fathom paginator (same as fathom-calls.js) ──
+// ── Fathom paginator ──────────────────────────────────────────────────────────
 async function fetchAllFathomCalls(apiKey, createdAfter) {
   const allCalls = [];
-  let cursor = null;
-  let page = 0;
+  let cursor  = null;
+  let page    = 0;
   const MAX_PAGES = 20;
 
   while (page < MAX_PAGES) {
-    const params = new URLSearchParams({ created_after: createdAfter, per_page: '50', 'teams[]': 'On-Boarding' });
+    const params = new URLSearchParams({
+      created_after: createdAfter,
+      per_page: '50',
+      'teams[]': 'On-Boarding'
+    });
     if (cursor) params.set('cursor', cursor);
 
-    const response = await fetch(`https://api.fathom.ai/external/v1/meetings?${params}`, {
-      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }
-    });
+    const response = await fetch(
+      `https://api.fathom.ai/external/v1/meetings?${params}`,
+      { headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' } }
+    );
 
-    if (!response.ok) throw new Error(`Fathom API ${response.status}: ${await response.text()}`);
+    if (!response.ok) {
+      throw new Error(`Fathom API ${response.status}: ${await response.text()}`);
+    }
 
     const data = await response.json();
     allCalls.push(...(data.items || []));
