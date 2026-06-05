@@ -1,9 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/refresh-fathom",
-      "schedule": "*/20 * * * *"
-    }
-  ]
-}
- 
