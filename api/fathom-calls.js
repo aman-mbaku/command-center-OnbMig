@@ -1,6 +1,6 @@
 // api/fathom-calls.js
 // GET /api/fathom-calls — returns last 4 weeks of calls filtered to onboarding POCs
-// Implements: lock + stale-while-revalidate to handle simultaneous cold-cache requests
+// Strategy: stale-while-revalidate — ALWAYS return cache instantly, refresh in background
 
 const POC_EMAILS = new Set([
   "aakash.revankar@loopwork.co",
@@ -15,11 +15,11 @@ const POC_EMAILS = new Set([
 
 const CACHE_KEY = 'fathom_calls_4weeks';
 const LOCK_KEY  = 'fathom_calls_lock';
-const FRESH_TTL = 1800;  // 30 min — serve from cache, no refetch
-const CACHE_TTL = 7200;  // 2 hours — keep stale data available as fallback
-const LOCK_TTL  = 25;    // 25s — lock lifetime (outlasts Vercel's 10s function limit)
+const FRESH_TTL = 1800;  // 30 min — treat as "fresh", no background refresh needed
+const CACHE_TTL = 86400; // 24 hours — keep stale data in KV as long as possible
+const LOCK_TTL  = 25;    // 25s — lock lifetime
 
-// ── KV helpers ──────────────────────────────────────────────────────────────
+// ── KV helpers ───────────────────────────────────────────────────────────────
 async function kvGet(apiUrl, apiToken, key) {
   try {
     const res = await fetch(`${apiUrl}/get/${key}`, {
@@ -53,6 +53,44 @@ async function kvDel(apiUrl, apiToken, key) {
   } catch { /* non-fatal */ }
 }
 
+// ── Background refresh (fire-and-forget) ─────────────────────────────────────
+async function backgroundRefresh(apiUrl, apiToken, fathomKey) {
+  // Check lock first — don't double-fetch
+  const lock = await kvGet(apiUrl, apiToken, LOCK_KEY);
+  if (lock) {
+    console.log('Background refresh skipped — lock held');
+    return;
+  }
+
+  // Acquire lock
+  await kvSet(apiUrl, apiToken, LOCK_KEY, { lockedAt: new Date().toISOString() }, LOCK_TTL);
+  console.log('Background refresh started');
+
+  try {
+    const fourWeeksAgo = new Date();
+    fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
+
+    const calls    = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
+    const filtered = calls.filter(call => {
+      const email = (call.recorded_by?.email || '').trim().toLowerCase();
+      return POC_EMAILS.has(email);
+    });
+
+    const payload = {
+      calls:     filtered,
+      total:     filtered.length,
+      fetchedAt: new Date().toISOString()
+    };
+
+    await kvSet(apiUrl, apiToken, CACHE_KEY, payload, CACHE_TTL);
+    console.log('Background refresh complete —', filtered.length, 'calls cached');
+  } catch (err) {
+    console.error('Background refresh failed:', err.message);
+  } finally {
+    await kvDel(apiUrl, apiToken, LOCK_KEY);
+  }
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -68,34 +106,37 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ── Step 1: Read cache ──────────────────────────────────────────────────
+    // ── Step 1: Always check cache first ──────────────────────────────────
     const cached = kvReady ? await kvGet(apiUrl, apiToken, CACHE_KEY) : null;
 
     if (cached) {
       const ageMs   = Date.now() - new Date(cached.fetchedAt).getTime();
       const isFresh = ageMs < FRESH_TTL * 1000;
 
-      // Fresh cache — return immediately, no Fathom call needed
       if (isFresh) {
+        // Fresh — return immediately, no refresh needed
         return res.status(200).json({ source: 'cache', ...cached });
-      }
+      } else {
+        // Stale — return IMMEDIATELY, trigger background refresh
+        // This is the key change: user never waits for Fathom
+        console.log('Stale cache — returning immediately, refreshing in background');
 
-      // Stale cache — check if someone else is already refreshing
-      if (kvReady) {
-        const lock = await kvGet(apiUrl, apiToken, LOCK_KEY);
-        if (lock) {
-          // Another instance is fetching — return stale data immediately
-          // Client will re-poll on next 5-min refresh cycle
-          console.log('Lock held by another instance — returning stale data');
-          return res.status(200).json({ source: 'stale', ...cached });
-        }
+        // Kick off background refresh (don't await — fire and forget)
+        backgroundRefresh(apiUrl, apiToken, fathomKey).catch(err => {
+          console.error('Background refresh error:', err.message);
+        });
+
+        return res.status(200).json({ source: 'stale', ...cached });
       }
-    } else if (kvReady) {
-      // No cache at all — check lock
+    }
+
+    // ── Step 2: No cache at all — cold start ──────────────────────────────
+    // Only happens once ever (or after 24h with zero traffic)
+    if (kvReady) {
       const lock = await kvGet(apiUrl, apiToken, LOCK_KEY);
       if (lock) {
-        // Someone else is fetching first-ever data — ask client to retry
-        console.log('Lock held, no stale data — asking client to retry');
+        // Another instance is doing the cold-start fetch — ask client to retry
+        console.log('Cold start lock held — asking client to retry');
         return res.status(200).json({
           calls: [],
           fetchedAt: null,
@@ -103,38 +144,28 @@ export default async function handler(req, res) {
           retryAfter: 15
         });
       }
-    }
-
-    // ── Step 2: Acquire lock ────────────────────────────────────────────────
-    if (kvReady) {
+      // Acquire lock for cold start fetch
       await kvSet(apiUrl, apiToken, LOCK_KEY, { lockedAt: new Date().toISOString() }, LOCK_TTL);
-      console.log('Lock acquired');
     }
 
-    // ── Step 3: Fetch from Fathom ───────────────────────────────────────────
+    // ── Step 3: Cold start — fetch from Fathom (only path that can be slow) ──
+    console.log('Cold start — fetching from Fathom');
     const fourWeeksAgo = new Date();
     fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
-    console.log('Fetching Fathom calls from:', fourWeeksAgo.toISOString());
 
     let calls;
     try {
       calls = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
     } catch (fetchErr) {
-      // Fathom fetch failed — release lock, return stale if available
-      console.error('Fathom fetch failed:', fetchErr.message);
+      console.error('Fathom cold start fetch failed:', fetchErr.message);
       if (kvReady) await kvDel(apiUrl, apiToken, LOCK_KEY);
-      if (cached) return res.status(200).json({ source: 'stale', ...cached });
       return res.status(200).json({ calls: [], fetchedAt: null, error: fetchErr.message });
     }
 
-    console.log('Total calls fetched:', calls.length);
-
-    // ── Step 4: Filter to POCs ──────────────────────────────────────────────
     const filtered = calls.filter(call => {
       const email = (call.recorded_by?.email || '').trim().toLowerCase();
       return POC_EMAILS.has(email);
     });
-    console.log('Filtered POC calls:', filtered.length);
 
     const payload = {
       calls:     filtered,
@@ -142,24 +173,22 @@ export default async function handler(req, res) {
       fetchedAt: new Date().toISOString()
     };
 
-    // ── Step 5: Store in KV (2-hour TTL so stale data is always available) ──
     if (kvReady) {
       await kvSet(apiUrl, apiToken, CACHE_KEY, payload, CACHE_TTL);
-      await kvDel(apiUrl, apiToken, LOCK_KEY); // release lock
-      console.log('Cache updated, lock released');
+      await kvDel(apiUrl, apiToken, LOCK_KEY);
+      console.log('Cold start complete —', filtered.length, 'calls cached');
     }
 
     return res.status(200).json({ source: 'fathom', ...payload });
 
   } catch (err) {
     console.error('GET /api/fathom-calls error:', err.message);
-    // Always release lock on unexpected error
     if (kvReady) await kvDel(apiUrl, apiToken, LOCK_KEY).catch(() => {});
     return res.status(200).json({ calls: [], fetchedAt: null, error: err.message });
   }
 }
 
-// ── Fathom paginator ─────────────────────────────────────────────────────────
+// ── Fathom paginator ──────────────────────────────────────────────────────────
 async function fetchAllFathomCalls(apiKey, createdAfter) {
   const allCalls = [];
   let cursor = null;
