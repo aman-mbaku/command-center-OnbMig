@@ -170,7 +170,8 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
     const params = new URLSearchParams({
       created_after: createdAfter,
       per_page: '50',
-      'teams[]': 'On-Boarding'
+      // No team filter — rely on POC_EMAILS to gate results
+      // (team filter would exclude POCs not assigned to 'On-Boarding' in Fathom)
     });
     if (cursor) params.set('cursor', cursor);
 
