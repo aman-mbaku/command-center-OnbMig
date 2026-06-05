@@ -1,6 +1,5 @@
 // api/refresh-fathom.js
-// Called by Vercel cron every 20 min — keeps Fathom cache warm
-// No auth needed since it only writes to your own KV, reads no user data
+// Called by GitHub Actions cron every 30 min — keeps Fathom cache warm
 
 export default async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'POST') {
@@ -32,7 +31,6 @@ export default async function handler(req, res) {
     "tarun.rana@loopwork.co",
   ]);
 
-  // ── KV helpers ──
   async function kvGet(key) {
     try {
       const r = await fetch(`${apiUrl}/get/${key}`, {
@@ -67,17 +65,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Skip if cache is still fresh — no need to refetch
+    // Skip if cache is still fresh
     const cached = await kvGet(CACHE_KEY);
     if (cached) {
       const ageMs = Date.now() - new Date(cached.fetchedAt).getTime();
       if (ageMs < FRESH_TTL * 1000) {
         console.log('Cron: cache still fresh, skipping');
         return res.status(200).json({
-          ok: true,
+          ok:      true,
           skipped: true,
-          reason: 'Cache fresh',
-          ageMin: Math.round(ageMs / 60000)
+          reason:  'Cache fresh',
+          ageMin:  Math.round(ageMs / 60000)
         });
       }
     }
@@ -124,7 +122,6 @@ export default async function handler(req, res) {
   }
 }
 
-// ── Fathom paginator ──────────────────────────────────────────────────────────
 async function fetchAllFathomCalls(apiKey, createdAfter) {
   const allCalls = [];
   let cursor  = null;
@@ -134,8 +131,8 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
   while (page < MAX_PAGES) {
     const params = new URLSearchParams({
       created_after: createdAfter,
-      per_page: '50',
-      'teams[]': 'On-Boarding'
+      per_page:      '50',
+      'teams[]':     'On-Boarding'
     });
     if (cursor) params.set('cursor', cursor);
 
