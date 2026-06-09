@@ -186,7 +186,8 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
     });
     if (cursor) params.set('cursor', cursor);
 
-    const url      = `https://api.fathom.ai/external/v1/meetings?${params}`;
+    // Append teams[] unencoded — URLSearchParams encodes brackets which Fathom rejects
+    const url = `https://api.fathom.ai/external/v1/meetings?${params}&teams[]=On-Boarding`;
     const response = await fetch(url, {
       headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }
     });
