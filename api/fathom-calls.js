@@ -2,15 +2,15 @@
 // GET /api/fathom-calls — returns last 4 weeks of calls filtered to onboarding POCs
 // Strategy: stale-while-revalidate — ALWAYS return cache instantly, refresh in background
 
-const POC_EMAILS = new Set([
-  "aakash.revankar@loopwork.co",
-  "aditi.goel@loopwork.co",
-  "aditya.gupta@loopwork.co",
-  "devak.grover@loopwork.co",
-  "jagrit.popli@loopwork.co",
-  "ritima.singh@loopwork.co",
-  "shivam.kumar@loopwork.co",
-  "tarun.rana@loopwork.co",
+const POC_NAMES = new Set([
+  "Aakash Revankar",
+  "Aditi Goel",
+  "Aditya Gupta",
+  "Devak Grover",
+  "Jagrit Popli",
+  "Ritima Singh",
+  "Shivam Kumar",
+  "Tarun Rana",
 ]);
 
 const CACHE_KEY = 'fathom_calls_4weeks';
@@ -72,8 +72,8 @@ async function backgroundRefresh(apiUrl, apiToken, fathomKey) {
 
     const calls    = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
     const filtered = calls.filter(call => {
-      const email = (call.recorded_by?.email || '').trim().toLowerCase();
-      return POC_EMAILS.has(email);
+      const name = (typeof call.recorded_by === 'string' ? call.recorded_by : (call.recorded_by?.name || '')).trim();
+      return POC_NAMES.has(name);
     });
 
     const payload = {
@@ -118,10 +118,8 @@ export default async function handler(req, res) {
         return res.status(200).json({ source: 'cache', ...cached });
       } else {
         // Stale — return IMMEDIATELY, trigger background refresh
-        // This is the key change: user never waits for Fathom
         console.log('Stale cache — returning immediately, refreshing in background');
 
-        // Kick off background refresh (don't await — fire and forget)
         backgroundRefresh(apiUrl, apiToken, fathomKey).catch(err => {
           console.error('Background refresh error:', err.message);
         });
@@ -131,11 +129,9 @@ export default async function handler(req, res) {
     }
 
     // ── Step 2: No cache at all — cold start ──────────────────────────────
-    // Only happens once ever (or after 24h with zero traffic)
     if (kvReady) {
       const lock = await kvGet(apiUrl, apiToken, LOCK_KEY);
       if (lock) {
-        // Another instance is doing the cold-start fetch — ask client to retry
         console.log('Cold start lock held — asking client to retry');
         return res.status(200).json({
           calls: [],
@@ -144,11 +140,10 @@ export default async function handler(req, res) {
           retryAfter: 15
         });
       }
-      // Acquire lock for cold start fetch
       await kvSet(apiUrl, apiToken, LOCK_KEY, { lockedAt: new Date().toISOString() }, LOCK_TTL);
     }
 
-    // ── Step 3: Cold start — fetch from Fathom (only path that can be slow) ──
+    // ── Step 3: Cold start — fetch from Fathom ────────────────────────────
     console.log('Cold start — fetching from Fathom');
     const fourWeeksAgo = new Date();
     fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
@@ -163,8 +158,8 @@ export default async function handler(req, res) {
     }
 
     const filtered = calls.filter(call => {
-      const email = (call.recorded_by?.email || '').trim().toLowerCase();
-      return POC_EMAILS.has(email);
+      const name = (typeof call.recorded_by === 'string' ? call.recorded_by : (call.recorded_by?.name || '')).trim();
+      return POC_NAMES.has(name);
     });
 
     const payload = {
