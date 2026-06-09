@@ -178,6 +178,7 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
   let cursor = null;
   let page   = 0;
   const MAX_PAGES = 20;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   while (page < MAX_PAGES) {
     const params = new URLSearchParams({
@@ -188,12 +189,19 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
 
     // Append teams[] unencoded — URLSearchParams encodes brackets which Fathom rejects
     const url = `https://api.fathom.ai/external/v1/meetings?${params}&teams[]=On-Boarding`;
-    const response = await fetch(url, {
-      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }
-    });
+
+    // Retry up to 3 times on 5xx
+    let response, errText;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await sleep(attempt * 2000); // 2s, 4s backoff
+      response = await fetch(url, {
+        headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' }
+      });
+      if (response.ok || response.status < 500) break; // success or 4xx — don't retry
+    }
 
     if (!response.ok) {
-      const errText = await response.text();
+      errText = await response.text();
       throw new Error(`Fathom API ${response.status}: ${errText}`);
     }
 
