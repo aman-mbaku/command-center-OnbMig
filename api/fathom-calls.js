@@ -15,9 +15,9 @@ const POC_NAMES = new Set([
 
 const CACHE_KEY = 'fathom_calls_4weeks';
 const LOCK_KEY  = 'fathom_calls_lock';
-const FRESH_TTL = 1800;  // 30 min — treat as "fresh", no background refresh needed
-const CACHE_TTL = 86400; // 24 hours — keep stale data in KV as long as possible
-const LOCK_TTL  = 25;    // 25s — lock lifetime
+const FRESH_TTL = 1800;  // 30 min
+const CACHE_TTL = 86400; // 24 hours
+const LOCK_TTL  = 25;    // 25s
 
 // ── KV helpers ───────────────────────────────────────────────────────────────
 async function kvGet(apiUrl, apiToken, key) {
@@ -55,33 +55,26 @@ async function kvDel(apiUrl, apiToken, key) {
 
 // ── Background refresh (fire-and-forget) ─────────────────────────────────────
 async function backgroundRefresh(apiUrl, apiToken, fathomKey) {
-  // Check lock first — don't double-fetch
   const lock = await kvGet(apiUrl, apiToken, LOCK_KEY);
   if (lock) {
     console.log('Background refresh skipped — lock held');
     return;
   }
-
-  // Acquire lock
   await kvSet(apiUrl, apiToken, LOCK_KEY, { lockedAt: new Date().toISOString() }, LOCK_TTL);
   console.log('Background refresh started');
-
   try {
     const fourWeeksAgo = new Date();
     fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
-
     const calls    = await fetchAllFathomCalls(fathomKey, fourWeeksAgo.toISOString());
-    const filtered = calls.filter(call => {
-      const name = (typeof call.recorded_by === 'string' ? call.recorded_by : (call.recorded_by?.name || '')).trim();
+    const filtered = calls.filter(c => {
+      const name = (typeof c.recorded_by === 'string' ? c.recorded_by : (c.recorded_by?.name || '')).trim();
       return POC_NAMES.has(name);
     });
-
     const payload = {
       calls:     filtered,
       total:     filtered.length,
       fetchedAt: new Date().toISOString()
     };
-
     await kvSet(apiUrl, apiToken, CACHE_KEY, payload, CACHE_TTL);
     console.log('Background refresh complete —', filtered.length, 'calls cached');
   } catch (err) {
@@ -114,21 +107,17 @@ export default async function handler(req, res) {
       const isFresh = ageMs < FRESH_TTL * 1000;
 
       if (isFresh) {
-        // Fresh — return immediately, no refresh needed
         return res.status(200).json({ source: 'cache', ...cached });
       } else {
-        // Stale — return IMMEDIATELY, trigger background refresh
         console.log('Stale cache — returning immediately, refreshing in background');
-
         backgroundRefresh(apiUrl, apiToken, fathomKey).catch(err => {
           console.error('Background refresh error:', err.message);
         });
-
         return res.status(200).json({ source: 'stale', ...cached });
       }
     }
 
-    // ── Step 2: No cache at all — cold start ──────────────────────────────
+    // ── Step 2: No cache — check for lock ─────────────────────────────────
     if (kvReady) {
       const lock = await kvGet(apiUrl, apiToken, LOCK_KEY);
       if (lock) {
@@ -157,8 +146,8 @@ export default async function handler(req, res) {
       return res.status(200).json({ calls: [], fetchedAt: null, error: fetchErr.message });
     }
 
-    const filtered = calls.filter(call => {
-      const name = (typeof call.recorded_by === 'string' ? call.recorded_by : (call.recorded_by?.name || '')).trim();
+    const filtered = calls.filter(c => {
+      const name = (typeof c.recorded_by === 'string' ? c.recorded_by : (c.recorded_by?.name || '')).trim();
       return POC_NAMES.has(name);
     });
 
@@ -194,7 +183,6 @@ async function fetchAllFathomCalls(apiKey, createdAfter) {
     const params = new URLSearchParams({
       created_after: createdAfter,
       per_page: '50',
-      'teams[]': 'On-Boarding'
     });
     if (cursor) params.set('cursor', cursor);
 
